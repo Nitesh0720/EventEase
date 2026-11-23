@@ -1,0 +1,35 @@
+{
+  "name": "eventease-backend",
+  "version": "1.0.0",
+  "description": "Backend API for EventEase College Event Management System",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "seed:admin": "node src/scripts/seedAdmin.js"
+  },
+  "keywords": [
+    "event-management",
+    "college",
+    "express",
+    "mongoose",
+    "api"
+  ],
+  "author": "EventEase Team",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.7.5",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.12.0",
+    "nodemailer": "^10.6.1",
+    "pdfkit": "^0.21.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
