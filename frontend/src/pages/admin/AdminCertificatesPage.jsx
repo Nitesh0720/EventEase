@@ -5,6 +5,7 @@ import {
   getEventCertificates,
   generateCertificate,
   generateBulkCertificates,
+  releaseCertificates,
   downloadCertificate,
   fetchEventAttendance,
   fetchEventAttendanceStats
@@ -22,6 +23,13 @@ const AdminCertificatesPage = () => {
 
   // Data states
   const [certificates, setCertificates] = useState([]);
+  const [certStats, setCertStats] = useState({
+    totalAttendees: 0,
+    totalCertificates: 0,
+    generatedCount: 0,
+    releasedCount: 0,
+    pendingCount: 0
+  });
   const [attendees, setAttendees] = useState([]);
   const [attendanceStats, setAttendanceStats] = useState({ totalPresent: 0, totalRegistered: 0 });
   const [loadingData, setLoadingData] = useState(false);
@@ -30,15 +38,19 @@ const AdminCertificatesPage = () => {
   // Action states
   const [generatingStudentId, setGeneratingStudentId] = useState(null);
   const [isBulkGenerating, setIsBulkGenerating] = useState(false);
+  const [isReleasing, setIsReleasing] = useState(false);
+  const [releasingCertId, setReleasingCertId] = useState(null);
   const [downloadingId, setDownloadingId] = useState(null);
 
   // Email delivery toggles (default false)
   const [sendEmailIndividual, setSendEmailIndividual] = useState(false);
   const [sendEmailBulk, setSendEmailBulk] = useState(false);
+  const [sendEmailRelease, setSendEmailRelease] = useState(false);
 
   // Modals & Feedback
   const [alert, setAlert] = useState({ type: '', message: '' });
   const [bulkSummary, setBulkSummary] = useState(null);
+  const [releaseSummary, setReleaseSummary] = useState(null);
   const [activeTab, setActiveTab] = useState('issued'); // 'issued' | 'attendees'
 
   // Load events on mount
@@ -80,6 +92,7 @@ const AdminCertificatesPage = () => {
       loadCertificateData(selectedEventId);
       setAlert({ type: '', message: '' });
       setBulkSummary(null);
+      setReleaseSummary(null);
     }
   }, [selectedEventId, events]);
 
@@ -95,6 +108,9 @@ const AdminCertificatesPage = () => {
 
       if (certRes.success) {
         setCertificates(certRes.certificates || []);
+        if (certRes.stats) {
+          setCertStats(certRes.stats);
+        }
       }
       if (attRes.success) {
         setAttendees(attRes.data || []);
@@ -151,16 +167,21 @@ const AdminCertificatesPage = () => {
     return sId && !issuedStudentIds.has(sId);
   });
 
+  // Generated (unreleased) certificates awaiting administrative release
+  const unreleasedCertificates = certificates.filter((c) => c.status === 'Generated');
+  // Released certificates (visible and downloadable by students)
+  const releasedCertificates = certificates.filter((c) => c.status === 'Released' || !c.status);
+
   // Handle individual certificate generation
   const handleGenerateIndividual = async (studentId, studentName) => {
     if (!selectedEventId || !studentId) return;
 
     const emailNotice = sendEmailIndividual
       ? "\n\nEmail delivery is enabled: an official PDF certificate will be queued to the student's email in the background."
-      : '\n\nEmail delivery is not requested: the certificate will be generated and available on the portal.';
+      : '\n\nEmail delivery is not requested: the certificate will be generated with status "Generated".';
 
     const confirmed = window.confirm(
-      `Issue an official Certificate of Participation to ${studentName}?${emailNotice}`
+      `Generate a Certificate of Participation for ${studentName}?${emailNotice}\n\nNote: The certificate will have status "Generated" until explicitly released.`
     );
     if (!confirmed) return;
 
@@ -170,19 +191,15 @@ const AdminCertificatesPage = () => {
     try {
       const res = await generateCertificate(selectedEventId, studentId, sendEmailIndividual);
       if (res.success) {
-        const emailMsg =
-          res.emailStatus === 'queued'
-            ? ' Email delivery has been queued in the background and will dispatch shortly.'
-            : ' (Email delivery was not requested).';
-
+        const certCode = res.certificate?.certificateId || 'CERT';
         setAlert({
           type: 'success',
-          message: `Certificate successfully issued for ${studentName} (${res.certificate.certificateId}).${emailMsg}`
+          message: `Certificate generated for ${studentName} (${certCode}) with status "Generated". Release it whenever you are ready for the student to view and download.`
         });
         await loadCertificateData(selectedEventId);
       }
     } catch (err) {
-      console.error('Error issuing certificate:', err);
+      console.error('Error generating certificate:', err);
       setAlert({
         type: 'danger',
         message: err.response?.data?.message || 'Failed to generate certificate'
@@ -199,10 +216,10 @@ const AdminCertificatesPage = () => {
     const pendingCount = pendingAttendees.length;
     const emailNotice = sendEmailBulk
       ? '\n\nEmail delivery is enabled: newly issued attendees will receive their PDF certificate via email in the background.'
-      : '\n\nEmail delivery is not requested: certificates will only be available on the portal.';
+      : '\n\nEmail delivery is not requested: certificates will be generated with status "Generated".';
 
     const confirmed = window.confirm(
-      `Generate bulk certificates for all eligible attendees of "${selectedEvent?.title}"?\n\nThis will issue certificates for ${pendingCount} pending attendee(s) and skip already issued certificates.${emailNotice}`
+      `Generate certificates for all eligible attendees of "${selectedEvent?.title}"?\n\nThis will generate certificates for ${pendingCount} pending attendee(s) with status "Generated". You can preview them before releasing.${emailNotice}`
     );
     if (!confirmed) return;
 
@@ -214,13 +231,9 @@ const AdminCertificatesPage = () => {
       const res = await generateBulkCertificates(selectedEventId, sendEmailBulk);
       if (res.success) {
         setBulkSummary(res.summary);
-        const emailSummaryMsg = res.summary.emailDeliveryRequested
-          ? ` Email delivery queued for ${res.summary.emailsQueued} new certificate(s).`
-          : ' Email delivery was not requested.';
-
         setAlert({
           type: 'success',
-          message: `${res.message || 'Bulk certificate generation completed successfully.'}${emailSummaryMsg}`
+          message: `${res.message || 'Bulk certificate generation completed successfully.'} Certificates are set to "Generated" and ready for review/release.`
         });
         await loadCertificateData(selectedEventId);
         setActiveTab('issued');
@@ -236,7 +249,80 @@ const AdminCertificatesPage = () => {
     }
   };
 
-  // Handle PDF download
+  // Handle release of all unreleased certificates for the event
+  const handleReleaseAll = async () => {
+    if (!selectedEventId) return;
+
+    const unreleasedCount = unreleasedCertificates.length;
+    if (unreleasedCount === 0) return;
+
+    const emailNotice = sendEmailRelease
+      ? '\n\nEmail delivery is enabled: students will be emailed their official PDF certificate.'
+      : '\n\nEmail delivery is not requested: students will be able to view and download certificates from their dashboard.';
+
+    const confirmed = window.confirm(
+      `Release ${unreleasedCount} generated certificate(s) for "${selectedEvent?.title}"?\n\nOnce released, students will be able to view and download their official certificates on EventEase.${emailNotice}`
+    );
+    if (!confirmed) return;
+
+    setIsReleasing(true);
+    setAlert({ type: '', message: '' });
+    setReleaseSummary(null);
+
+    try {
+      const res = await releaseCertificates(selectedEventId, [], sendEmailRelease);
+      if (res.success) {
+        setReleaseSummary(res.summary);
+        setAlert({
+          type: 'success',
+          message: `Successfully released ${res.summary.newlyReleased} certificate(s)! Students can now view and download their verified certificates.`
+        });
+        await loadCertificateData(selectedEventId);
+      }
+    } catch (err) {
+      console.error('Error releasing certificates:', err);
+      setAlert({
+        type: 'danger',
+        message: err.response?.data?.message || 'Failed to release certificates'
+      });
+    } finally {
+      setIsReleasing(false);
+    }
+  };
+
+  // Handle release of a single certificate
+  const handleReleaseIndividual = async (certId, studentName) => {
+    if (!selectedEventId || !certId) return;
+
+    const confirmed = window.confirm(
+      `Release certificate for ${studentName}? Once released, the student can view and download their certificate.`
+    );
+    if (!confirmed) return;
+
+    setReleasingCertId(certId);
+    setAlert({ type: '', message: '' });
+
+    try {
+      const res = await releaseCertificates(selectedEventId, [certId], false);
+      if (res.success) {
+        setAlert({
+          type: 'success',
+          message: `Certificate for ${studentName} has been released successfully.`
+        });
+        await loadCertificateData(selectedEventId);
+      }
+    } catch (err) {
+      console.error('Error releasing individual certificate:', err);
+      setAlert({
+        type: 'danger',
+        message: err.response?.data?.message || 'Failed to release certificate'
+      });
+    } finally {
+      setReleasingCertId(null);
+    }
+  };
+
+  // Handle PDF preview/download (Admins can preview unreleased and released certs)
   const handleDownload = async (certId, certCode) => {
     setDownloadingId(certId);
     try {
@@ -260,7 +346,8 @@ const AdminCertificatesPage = () => {
     const email = c.student?.email?.toLowerCase() || '';
     const code = c.certificateId?.toLowerCase() || '';
     const dept = c.student?.department?.toLowerCase() || '';
-    return name.includes(q) || email.includes(q) || code.includes(q) || dept.includes(q);
+    const status = (c.status || 'Released').toLowerCase();
+    return name.includes(q) || email.includes(q) || code.includes(q) || dept.includes(q) || status.includes(q);
   });
 
   const filteredAttendees = pendingAttendees.filter((att) => {
@@ -286,9 +373,9 @@ const AdminCertificatesPage = () => {
               <li className="breadcrumb-item active" aria-current="page">Certificates</li>
             </ol>
           </nav>
-          <h1 className="h3 fw-bold text-navy mb-0">Certificate Management</h1>
+          <h1 className="h3 fw-bold text-navy mb-0">Certificate Management & Release</h1>
           <p className="text-muted small mb-0">
-            Issue, manage, and download verified certificates of participation for concluded events.
+            Generate, preview, and release verified certificates of participation for eligible event attendees.
           </p>
         </div>
 
@@ -346,11 +433,29 @@ const AdminCertificatesPage = () => {
                 </strong>
               </div>
             </div>
-            {bulkSummary.emailDeliveryRequested && (
-              <div className="mt-2 pt-2 border-top border-primary-subtle small text-primary-emphasis">
-                <strong>Email Delivery:</strong> {bulkSummary.emailsQueued} email{bulkSummary.emailsQueued === 1 ? '' : 's'} queued for newly issued certificates.
+          </div>
+        </div>
+      )}
+
+      {/* Release Summary Banner */}
+      {releaseSummary && (
+        <div className="card border-success-subtle bg-success-subtle mb-4 shadow-sm">
+          <div className="card-body py-3">
+            <h6 className="fw-bold text-success mb-2">Certificate Release Summary</h6>
+            <div className="row g-2 text-center text-md-start small">
+              <div className="col-6 col-md-4">
+                <span className="text-muted">Newly Released:</span>{' '}
+                <strong className="text-success">{releaseSummary.newlyReleased}</strong>
               </div>
-            )}
+              <div className="col-6 col-md-4">
+                <span className="text-muted">Already Released:</span>{' '}
+                <strong className="text-navy">{releaseSummary.alreadyReleased}</strong>
+              </div>
+              <div className="col-6 col-md-4">
+                <span className="text-muted">Emails Queued:</span>{' '}
+                <strong className="text-navy">{releaseSummary.emailsQueued}</strong>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -434,6 +539,7 @@ const AdminCertificatesPage = () => {
         <>
           {/* Overview Metric Cards */}
           <div className="row g-3 mb-4">
+            {/* Card 1: Verified Attendees */}
             <div className="col-12 col-sm-6 col-lg-3">
               <div className="card border-0 shadow-sm h-100 border-start border-primary border-4">
                 <div className="card-body p-3">
@@ -446,65 +552,81 @@ const AdminCertificatesPage = () => {
               </div>
             </div>
 
-            <div className="col-12 col-sm-6 col-lg-3">
-              <div className="card border-0 shadow-sm h-100 border-start border-success border-4">
-                <div className="card-body p-3">
-                  <div className="text-muted small fw-bold text-uppercase">Certificates Issued</div>
-                  <div className="h3 fw-bold text-success mt-1 mb-0">{certificates.length}</div>
-                  <div className="small text-muted mt-1">Generated and downloadable</div>
-                </div>
-              </div>
-            </div>
-
+            {/* Card 2: Generated (Unreleased) */}
             <div className="col-12 col-sm-6 col-lg-3">
               <div className="card border-0 shadow-sm h-100 border-start border-warning border-4">
                 <div className="card-body p-3">
-                  <div className="text-muted small fw-bold text-uppercase">Pending Issuance</div>
+                  <div className="text-muted small fw-bold text-uppercase">Generated (Pending Release)</div>
                   <div className="h3 fw-bold text-warning-emphasis mt-1 mb-0">
-                    {pendingAttendees.length}
+                    {unreleasedCertificates.length}
                   </div>
-                  <div className="small text-muted mt-1">Verified attendees awaiting certificates</div>
+                  <div className="small text-muted mt-1">Awaiting admin release to students</div>
                 </div>
               </div>
             </div>
 
+            {/* Card 3: Released */}
+            <div className="col-12 col-sm-6 col-lg-3">
+              <div className="card border-0 shadow-sm h-100 border-start border-success border-4">
+                <div className="card-body p-3">
+                  <div className="text-muted small fw-bold text-uppercase">Released to Students</div>
+                  <div className="h3 fw-bold text-success mt-1 mb-0">
+                    {releasedCertificates.length}
+                  </div>
+                  <div className="small text-muted mt-1">Visible & downloadable by students</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Card 4: Action Center */}
             <div className="col-12 col-sm-6 col-lg-3">
               <div className="card border-0 shadow-sm h-100 border-start border-info border-4">
                 <div className="card-body p-3 d-flex flex-column justify-content-between">
                   <div>
-                    <div className="text-muted small fw-bold text-uppercase">Bulk Action</div>
-                    <div className="small text-muted mt-1">Issue to all eligible attendees</div>
-                    <div className="form-check mt-2">
+                    <div className="text-muted small fw-bold text-uppercase">Release Workflow</div>
+                    <div className="form-check mt-1">
                       <input
                         className="form-check-input"
                         type="checkbox"
-                        id="sendEmailBulkCheck"
-                        checked={sendEmailBulk}
-                        onChange={(e) => setSendEmailBulk(e.target.checked)}
+                        id="sendEmailReleaseCheck"
+                        checked={sendEmailRelease}
+                        onChange={(e) => setSendEmailRelease(e.target.checked)}
                       />
-                      <label className="form-check-label small text-muted" htmlFor="sendEmailBulkCheck">
-                        Email certificates to newly issued attendees
+                      <label className="form-check-label small text-muted" htmlFor="sendEmailReleaseCheck">
+                        Email PDF on release
                       </label>
                     </div>
-                    <div className="text-muted" style={{ fontSize: '0.72rem' }}>
-                      (Existing certificates are not emailed again)
-                    </div>
                   </div>
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-sm fw-semibold w-100 mt-2"
-                    onClick={handleGenerateBulk}
-                    disabled={isBulkGenerating || pendingAttendees.length === 0 || !eventEnded}
-                    title={
-                      !eventEnded
-                        ? 'Event must be concluded before certificates can be issued'
-                        : pendingAttendees.length === 0
-                        ? 'No pending attendees'
-                        : 'Generate bulk certificates'
-                    }
-                  >
-                    {isBulkGenerating ? 'Generating...' : `Generate All (${pendingAttendees.length})`}
-                  </button>
+                  <div className="d-flex flex-column gap-1 mt-2">
+                    <button
+                      type="button"
+                      className="btn btn-success btn-sm fw-semibold w-100"
+                      onClick={handleReleaseAll}
+                      disabled={isReleasing || unreleasedCertificates.length === 0}
+                      title={
+                        unreleasedCertificates.length === 0
+                          ? 'No unreleased certificates to release'
+                          : 'Release all generated certificates to students'
+                      }
+                    >
+                      {isReleasing ? 'Releasing...' : `Release All (${unreleasedCertificates.length})`}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline-primary btn-sm fw-semibold w-100"
+                      onClick={handleGenerateBulk}
+                      disabled={isBulkGenerating || pendingAttendees.length === 0 || !eventEnded}
+                      title={
+                        !eventEnded
+                          ? 'Event must be concluded before certificates can be issued'
+                          : pendingAttendees.length === 0
+                          ? 'No pending attendees'
+                          : 'Generate bulk certificates'
+                      }
+                    >
+                      {isBulkGenerating ? 'Generating...' : `Generate Pending (${pendingAttendees.length})`}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -531,7 +653,7 @@ const AdminCertificatesPage = () => {
                       className={`nav-link small fw-semibold ${activeTab === 'issued' ? 'active' : ''}`}
                       onClick={() => setActiveTab('issued')}
                     >
-                      Issued Certificates ({certificates.length})
+                      All Certificates ({certificates.length})
                     </button>
                   </li>
                   <li className="nav-item">
@@ -549,7 +671,7 @@ const AdminCertificatesPage = () => {
                   <input
                     type="text"
                     className="form-control form-control-sm"
-                    placeholder="Search by student, ID, or department..."
+                    placeholder="Search by student, ID, department, or status..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
@@ -563,53 +685,82 @@ const AdminCertificatesPage = () => {
                 {filteredCertificates.length === 0 ? (
                   <div className="text-center py-5 text-muted small">
                     {certificates.length === 0
-                      ? 'No certificates have been issued for this event yet.'
-                      : 'No issued certificates match your search filter.'}
+                      ? 'No certificates have been generated for this event yet.'
+                      : 'No certificates match your search filter.'}
                   </div>
                 ) : (
                   <table className="table table-hover align-middle mb-0">
                     <thead className="table-light small text-muted text-uppercase">
                       <tr>
                         <th style={{ width: '5%' }}>#</th>
-                        <th style={{ width: '25%' }}>Student</th>
-                        <th style={{ width: '20%' }}>Department & Year</th>
-                        <th style={{ width: '20%' }}>Certificate ID</th>
-                        <th style={{ width: '15%' }}>Issued On</th>
-                        <th style={{ width: '15%' }} className="text-end">Actions</th>
+                        <th style={{ width: '22%' }}>Student</th>
+                        <th style={{ width: '18%' }}>Department & Year</th>
+                        <th style={{ width: '18%' }}>Certificate ID</th>
+                        <th style={{ width: '15%' }}>Status</th>
+                        <th style={{ width: '10%' }}>Issued On</th>
+                        <th style={{ width: '12%' }} className="text-end">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="small">
-                      {filteredCertificates.map((cert, index) => (
-                        <tr key={cert._id}>
-                          <td className="text-muted">{index + 1}</td>
-                          <td>
-                            <div className="fw-semibold text-navy">{cert.student?.name || 'Unknown Student'}</div>
-                            <div className="text-muted small">{cert.student?.email}</div>
-                          </td>
-                          <td>
-                            <div>{cert.student?.department || 'N/A'}</div>
-                            <div className="text-muted small">{cert.student?.year || ''}</div>
-                          </td>
-                          <td>
-                            <span className="badge bg-light text-navy border font-monospace">
-                              {cert.certificateId}
-                            </span>
-                          </td>
-                          <td>
-                            {cert.issuedAt ? new Date(cert.issuedAt).toLocaleDateString() : 'N/A'}
-                          </td>
-                          <td className="text-end">
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-outline-primary fw-semibold"
-                              onClick={() => handleDownload(cert._id, cert.certificateId)}
-                              disabled={downloadingId === cert._id}
-                            >
-                              {downloadingId === cert._id ? 'Downloading...' : 'Download PDF'}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                      {filteredCertificates.map((cert, index) => {
+                        const isReleased = cert.status === 'Released' || !cert.status;
+                        return (
+                          <tr key={cert._id}>
+                            <td className="text-muted">{index + 1}</td>
+                            <td>
+                              <div className="fw-semibold text-navy">{cert.student?.name || 'Unknown Student'}</div>
+                              <div className="text-muted small">{cert.student?.email}</div>
+                            </td>
+                            <td>
+                              <div>{cert.student?.department || 'N/A'}</div>
+                              <div className="text-muted small">{cert.student?.year || ''}</div>
+                            </td>
+                            <td>
+                              <span className="badge bg-light text-navy border font-monospace">
+                                {cert.certificateId}
+                              </span>
+                            </td>
+                            <td>
+                              {isReleased ? (
+                                <span className="badge bg-success-subtle text-success border border-success-subtle fw-semibold">
+                                  Released
+                                </span>
+                              ) : (
+                                <span className="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle fw-semibold">
+                                  Generated
+                                </span>
+                              )}
+                            </td>
+                            <td>
+                              {cert.issuedAt ? new Date(cert.issuedAt).toLocaleDateString() : 'N/A'}
+                            </td>
+                            <td className="text-end">
+                              <div className="d-flex justify-content-end gap-1">
+                                {!isReleased && (
+                                  <button
+                                    type="button"
+                                    className="btn btn-sm btn-success fw-semibold"
+                                    onClick={() => handleReleaseIndividual(cert._id, cert.student?.name)}
+                                    disabled={releasingCertId === cert._id}
+                                    title="Release this certificate so student can view and download"
+                                  >
+                                    {releasingCertId === cert._id ? 'Releasing...' : 'Release'}
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-outline-primary fw-semibold"
+                                  onClick={() => handleDownload(cert._id, cert.certificateId)}
+                                  disabled={downloadingId === cert._id}
+                                  title="Admin preview of certificate PDF"
+                                >
+                                  {downloadingId === cert._id ? 'Downloading...' : 'Preview PDF'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 )}
@@ -632,67 +783,67 @@ const AdminCertificatesPage = () => {
                       onChange={(e) => setSendEmailIndividual(e.target.checked)}
                     />
                     <label className="form-check-label small text-navy fw-semibold" htmlFor="sendEmailIndividualCheck">
-                      Email certificate to the student
+                      Email certificate to the student upon generation
                     </label>
                   </div>
                 </div>
 
                 <div className="table-responsive">
                   {filteredAttendees.length === 0 ? (
-                  <div className="text-center py-5 text-muted small">
-                    {pendingAttendees.length === 0
-                      ? 'All verified attendees have already been issued certificates.'
-                      : 'No pending attendees match your search filter.'}
-                  </div>
-                ) : (
-                  <table className="table table-hover align-middle mb-0">
-                    <thead className="table-light small text-muted text-uppercase">
-                      <tr>
-                        <th style={{ width: '5%' }}>#</th>
-                        <th style={{ width: '30%' }}>Student</th>
-                        <th style={{ width: '25%' }}>Department & Year</th>
-                        <th style={{ width: '20%' }}>Check-in Time</th>
-                        <th style={{ width: '20%' }} className="text-end">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="small">
-                      {filteredAttendees.map((att, index) => (
-                        <tr key={att._id}>
-                          <td className="text-muted">{index + 1}</td>
-                          <td>
-                            <div className="fw-semibold text-navy">{att.student?.name}</div>
-                            <div className="text-muted small">{att.student?.email}</div>
-                          </td>
-                          <td>
-                            <div>{att.student?.department || 'N/A'}</div>
-                            <div className="text-muted small">{att.student?.year || ''}</div>
-                          </td>
-                          <td>
-                            {att.checkInTime ? new Date(att.checkInTime).toLocaleString() : 'N/A'}
-                          </td>
-                          <td className="text-end">
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-success fw-semibold"
-                              onClick={() => handleGenerateIndividual(att.student?._id, att.student?.name)}
-                              disabled={generatingStudentId === att.student?._id || !eventEnded}
-                              title={
-                                !eventEnded
-                                  ? 'Event must conclude before generating certificate'
-                                  : 'Issue Certificate'
-                              }
-                            >
-                              {generatingStudentId === att.student?._id ? 'Issuing...' : 'Issue Certificate'}
-                            </button>
-                          </td>
+                    <div className="text-center py-5 text-muted small">
+                      {pendingAttendees.length === 0
+                        ? 'All verified attendees have already been issued certificates.'
+                        : 'No pending attendees match your search filter.'}
+                    </div>
+                  ) : (
+                    <table className="table table-hover align-middle mb-0">
+                      <thead className="table-light small text-muted text-uppercase">
+                        <tr>
+                          <th style={{ width: '5%' }}>#</th>
+                          <th style={{ width: '30%' }}>Student</th>
+                          <th style={{ width: '25%' }}>Department & Year</th>
+                          <th style={{ width: '20%' }}>Check-in Time</th>
+                          <th style={{ width: '20%' }} className="text-end">Action</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
+                      </thead>
+                      <tbody className="small">
+                        {filteredAttendees.map((att, index) => (
+                          <tr key={att._id}>
+                            <td className="text-muted">{index + 1}</td>
+                            <td>
+                              <div className="fw-semibold text-navy">{att.student?.name}</div>
+                              <div className="text-muted small">{att.student?.email}</div>
+                            </td>
+                            <td>
+                              <div>{att.student?.department || 'N/A'}</div>
+                              <div className="text-muted small">{att.student?.year || ''}</div>
+                            </td>
+                            <td>
+                              {att.checkInTime ? new Date(att.checkInTime).toLocaleString() : 'N/A'}
+                            </td>
+                            <td className="text-end">
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-success fw-semibold"
+                                onClick={() => handleGenerateIndividual(att.student?._id, att.student?.name)}
+                                disabled={generatingStudentId === att.student?._id || !eventEnded}
+                                title={
+                                  !eventEnded
+                                    ? 'Event must be concluded before certificates can be issued'
+                                    : 'Generate certificate'
+                                }
+                              >
+                                {generatingStudentId === att.student?._id ? 'Generating...' : 'Generate Certificate'}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
           </div>
         </>
       )}
@@ -701,4 +852,3 @@ const AdminCertificatesPage = () => {
 };
 
 export default AdminCertificatesPage;
-

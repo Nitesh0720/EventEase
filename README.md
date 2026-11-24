@@ -93,9 +93,12 @@ EventEase/
 │   │   │   ├── healthRoutes.js       # Health check route definitions
 │   │   │   └── registrationRoutes.js # Module 5: Student registration routes
 │   │   ├── scripts/
+│   │   │   ├── fixtures/
+│   │   │   │   └── testFixtures.js   # Isolated disposable fixture factory for automated test suites
+│   │   │   ├── runAllTests.js        # Master automated regression test runner
 │   │   │   ├── seedAdmin.js          # Initial Admin provisioning script
-│   │   │   ├── seedAttendanceTest.js # Module 7: Local attendance testing helper
-│   │   │   ├── seedCertificateTest.js # Module 8: Local certificate testing helper
+│   │   │   ├── testAttendanceSuite.js # Module 1: Comprehensive attendance automated test suite
+│   │   │   ├── testCertificateSuite.js # Module 2 & 3: Comprehensive certificate and release test suite
 │   │   │   └── testRateLimiting.js   # Automated test suite for targeted API rate limiting
 │   │   └── utils/
 │   │       ├── generateCertificateId.js # Module 8: Cryptographic certificate ID generator (CERT-YYYY-XXXX-XXXX)

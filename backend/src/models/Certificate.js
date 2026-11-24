@@ -46,6 +46,22 @@ const certificateSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: [true, 'Admin identifier is required']
+    },
+    status: {
+      type: String,
+      enum: {
+        values: ['Generated', 'Released'],
+        message: 'Status must be either Generated or Released'
+      }
+    },
+    releasedAt: {
+      type: Date,
+      default: null
+    },
+    releasedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null
     }
   },
   {

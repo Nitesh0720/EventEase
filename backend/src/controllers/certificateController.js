@@ -170,7 +170,8 @@ const generateIndividualCertificate = async (req, res) => {
       registration: registration._id,
       attendance: attendance._id,
       issuedAt: new Date(),
-      issuedBy: req.user._id
+      issuedBy: req.user._id,
+      status: 'Generated'
     });
 
     // Handle optional asynchronous email dispatch
@@ -317,7 +318,8 @@ const generateBulkCertificates = async (req, res) => {
           registration: att.registration,
           attendance: att._id,
           issuedAt: new Date(),
-          issuedBy: req.user._id
+          issuedBy: req.user._id,
+          status: 'Generated'
         });
 
         existingRegIdSet.add(regIdStr);
@@ -386,14 +388,29 @@ const getEventCertificates = async (req, res) => {
   }
 
   try {
-    const certificates = await Certificate.find({ event: eventId })
-      .populate('student', 'name email department year')
-      .populate('issuedBy', 'name')
-      .sort({ issuedAt: -1 });
+    const [certificates, totalAttendees] = await Promise.all([
+      Certificate.find({ event: eventId })
+        .populate('student', 'name email department year')
+        .populate('issuedBy', 'name')
+        .populate('releasedBy', 'name')
+        .sort({ issuedAt: -1 }),
+      Attendance.countDocuments({ event: eventId })
+    ]);
+
+    const generatedCount = certificates.filter((c) => c.status === 'Generated').length;
+    const releasedCount = certificates.filter((c) => c.status === 'Released' || !c.status).length;
+    const pendingCount = Math.max(0, totalAttendees - certificates.length);
 
     return res.status(200).json({
       success: true,
       count: certificates.length,
+      stats: {
+        totalAttendees,
+        totalCertificates: certificates.length,
+        generatedCount,
+        releasedCount,
+        pendingCount
+      },
       certificates
     });
   } catch (error) {
@@ -406,13 +423,131 @@ const getEventCertificates = async (req, res) => {
 };
 
 /**
+ * Release Certificates for an Event
+ * POST /api/certificates/release
+ * Private (Admin only)
+ */
+const releaseCertificates = async (req, res) => {
+  const { eventId, certificateIds, sendEmail } = req.body;
+  const shouldSendEmail = Boolean(sendEmail);
+
+  if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Valid event identifier is required'
+    });
+  }
+
+  try {
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: 'Event not found'
+      });
+    }
+
+    // Build query for certificates belonging strictly to the selected event
+    const query = { event: eventId };
+    if (Array.isArray(certificateIds) && certificateIds.length > 0) {
+      const validIds = certificateIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+      query._id = { $in: validIds };
+    }
+
+    // Find candidate certificates populated with attendance and student
+    const certificates = await Certificate.find(query)
+      .populate('attendance')
+      .populate('student');
+
+    if (certificates.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No certificates found to release for this event',
+        summary: {
+          totalEligible: 0,
+          newlyReleased: 0,
+          alreadyReleased: 0,
+          emailsQueued: 0
+        }
+      });
+    }
+
+    let newlyReleased = 0;
+    let alreadyReleased = 0;
+    let emailsQueued = 0;
+    const now = new Date();
+
+    for (const cert of certificates) {
+      // Security check: Must have verified attendance belonging to this event
+      if (!cert.attendance || cert.attendance.event.toString() !== eventId.toString()) {
+        continue;
+      }
+
+      // Idempotency: skip if already released
+      if (cert.status === 'Released') {
+        alreadyReleased++;
+        continue;
+      }
+
+      // Transition to Released
+      cert.status = 'Released';
+      cert.releasedAt = now;
+      cert.releasedBy = req.user._id;
+      await cert.save();
+      newlyReleased++;
+
+      // Optional email delivery upon release
+      if (shouldSendEmail && cert.student && cert.student.email) {
+        try {
+          const pdfBuffer = await generateCertificatePdf({
+            certificate: cert,
+            student: cert.student,
+            event
+          });
+          queueCertificateEmailAsync({
+            student: cert.student,
+            event,
+            certificate: cert,
+            pdfBuffer
+          });
+          emailsQueued++;
+        } catch (emailErr) {
+          console.error('[Certificate Release Email Error]:', emailErr.message);
+        }
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Certificate release completed. Newly released: ${newlyReleased}, Already released: ${alreadyReleased}`,
+      summary: {
+        totalEligible: certificates.length,
+        newlyReleased,
+        alreadyReleased,
+        emailsQueued
+      }
+    });
+  } catch (error) {
+    console.error('[Certificate Controller Error - releaseCertificates]:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to release certificates'
+    });
+  }
+};
+
+/**
  * Get Authenticated Student's Certificates
  * GET /api/certificates/my-certificates
  * Private (Student only)
  */
 const getMyCertificates = async (req, res) => {
   try {
-    const certificates = await Certificate.find({ student: req.user._id })
+    // Only return Released certificates (with backward compatibility for legacy certificates without status)
+    const certificates = await Certificate.find({
+      student: req.user._id,
+      status: { $in: ['Released', null] }
+    })
       .populate('event', 'title date startTime endTime venue category organizer')
       .sort({ issuedAt: -1 });
 
@@ -468,6 +603,14 @@ const downloadCertificatePdf = async (req, res) => {
       });
     }
 
+    // Students cannot download unreleased certificates; Admins can preview any certificate
+    if (!isAdmin && certificate.status === 'Generated') {
+      return res.status(403).json({
+        success: false,
+        message: 'This certificate has been generated but not yet released by the event administrator'
+      });
+    }
+
     const pdfBuffer = await generateCertificatePdf({
       certificate,
       student: certificate.student,
@@ -501,6 +644,7 @@ const verifyCertificatePublic = async (req, res) => {
     return res.status(400).json({
       success: false,
       valid: false,
+      isReleased: false,
       message: 'Certificate ID is required'
     });
   }
@@ -514,25 +658,37 @@ const verifyCertificatePublic = async (req, res) => {
       return res.status(404).json({
         success: false,
         valid: false,
+        isReleased: false,
         message: 'Certificate not found or invalid certificate ID'
       });
     }
+
+    // Resolve status: legacy certificates without a status field default to 'Released'
+    const status = certificate.status || 'Released';
+    const isReleased = status === 'Released';
 
     // Expose only non-sensitive verification data
     return res.status(200).json({
       success: true,
       valid: true,
+      isReleased,
+      status,
       certificateId: certificate.certificateId,
       studentName: certificate.student?.name || 'Verified Participant',
       eventTitle: certificate.event?.title || 'Campus Event',
       eventDate: certificate.event?.date || null,
-      issuedAt: certificate.issuedAt
+      issuedAt: certificate.issuedAt,
+      releasedAt: certificate.releasedAt || null,
+      message: isReleased
+        ? 'Certificate is officially verified and released'
+        : 'Certificate has been generated but is pending official administrative release'
     });
   } catch (error) {
     console.error('[Certificate Controller Error - verifyPublic]:', error.message);
     return res.status(500).json({
       success: false,
       valid: false,
+      isReleased: false,
       message: 'Failed to verify certificate'
     });
   }
@@ -541,6 +697,7 @@ const verifyCertificatePublic = async (req, res) => {
 module.exports = {
   generateIndividualCertificate,
   generateBulkCertificates,
+  releaseCertificates,
   getEventCertificates,
   getMyCertificates,
   downloadCertificatePdf,

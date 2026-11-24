@@ -22,8 +22,38 @@ app.set('trust proxy', 1);
 // Connect to database (if configured)
 connectDB();
 
+// CORS Configuration
+const isProduction = process.env.NODE_ENV === 'production';
+const configuredClientUrl = process.env.CLIENT_URL ? process.env.CLIENT_URL.trim().replace(/\/+$/, '') : null;
+
+// Allow production requests strictly from CLIENT_URL; in development, allow local Vite frontend(s)
+const allowedOrigins = isProduction
+  ? (configuredClientUrl ? [configuredClientUrl] : [])
+  : [
+      'http://localhost:5173',
+      'http://localhost:3000',
+      ...(configuredClientUrl ? [configuredClientUrl] : [])
+    ];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests without Origin header (e.g. mobile apps, curl, server-to-server, health checks)
+    if (!origin) {
+      return callback(null, true);
+    }
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
+  optionsSuccessStatus: 204
+};
+
 // Core Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

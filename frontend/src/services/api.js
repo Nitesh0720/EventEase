@@ -245,6 +245,24 @@ export const generateBulkCertificates = async (eventId, sendEmail = false) => {
 };
 
 /**
+ * Release certificates for an event, making them visible and downloadable by students (Admin only)
+ * @param {string} eventId
+ * @param {string[]} [certificateIds] - Optional array of specific certificate IDs to release (releases all if omitted)
+ * @param {boolean} [sendEmail=false] - Whether to email released certificates to students
+ */
+export const releaseCertificates = async (eventId, certificateIds = [], sendEmail = false) => {
+  const payload = {
+    eventId,
+    sendEmail: Boolean(sendEmail)
+  };
+  if (Array.isArray(certificateIds) && certificateIds.length > 0) {
+    payload.certificateIds = certificateIds;
+  }
+  const response = await apiClient.post('/certificates/release', payload);
+  return response.data;
+};
+
+/**
  * Fetch certificates issued for an event (Admin only)
  * @param {string} eventId
  */

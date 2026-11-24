@@ -3,6 +3,7 @@ const router = express.Router();
 const {
   generateIndividualCertificate,
   generateBulkCertificates,
+  releaseCertificates,
   getEventCertificates,
   getMyCertificates,
   downloadCertificatePdf,
@@ -20,9 +21,10 @@ router.get('/my-certificates', protect, authorize('Student'), getMyCertificates)
 // Dual-role route: download certificate PDF (Admin or owning Student)
 router.get('/:id/download', protect, downloadCertificatePdf);
 
-// Admin routes: individual and bulk issuance, event certificate roster
+// Admin routes: individual and bulk issuance, release, and event certificate roster
 router.post('/generate', protect, authorize('Admin'), generateIndividualCertificate);
 router.post('/generate-bulk', protect, authorize('Admin'), generateBulkCertificates);
+router.post('/release', protect, authorize('Admin'), releaseCertificates);
 router.get('/event/:eventId', protect, authorize('Admin'), getEventCertificates);
 
 module.exports = router;
